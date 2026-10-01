@@ -322,7 +322,7 @@ function peopleStepBasics(container, person) {
       <div class="field"><span class="label">Sex</span>${uiSegmented('sex', [{ value: 'female', label: 'Female' }, { value: 'male', label: 'Male' }, { value: 'other', label: 'Other or prefer not to say' }], person.sex || '')}
         <div class="hint">Used only where a rule differs by sex.</div></div>
       <div class="grid-2">
-        <div class="field"><label for="pb-age">Age (years)</label><input id="pb-age" type="number" inputmode="numeric" min="0" max="120" value="${person.age ?? ''}"></div>
+        <div class="field"><label for="pb-age">Age (years)</label><input id="pb-age" type="number" inputmode="numeric" min="0" max="120" value="${uiEsc(person.age ?? '')}"></div>
         <div class="field"><label for="pb-weight">Weight (lb)</label><input id="pb-weight" type="number" inputmode="decimal" min="1" max="900" step="1" value="${lb}">
           <div class="hint">Optional. Some rules are written per kilogram of body weight (for example protein in kidney disease); the app converts for you. Without a weight those rules are shown but not turned into a daily number.</div></div>
         <div class="field"><span class="label" id="pb-height-label">Height (ft / in)</span>
@@ -473,8 +473,9 @@ function peopleModulePanelHTML(m, person) {
 }
 function peopleConfigurableRuleHTML(r, person) {
   const def = r.default || r.default_for_allergy || (r.kind === 'avoid' ? 'exclude' : 'allow');
-  const cur = person.rule_settings[r.id] || def;
-  return `<div class="field"><span class="label">${uiEsc(r.text)}</span>${uiSegmented('setting-' + r.id, [{ value: 'allow', label: 'Allow' }, { value: 'exclude', label: 'Exclude' }], cur, { label: r.id })}<div class="hint">Default: ${def}. Your choice: ${cur}.</div></div>`;
+  const key = r.setting || r.id;   // two rules can share one choice (P0-2)
+  const cur = person.rule_settings[key] || def;
+  return `<div class="field"><span class="label">${uiEsc(r.text)}</span>${uiSegmented('setting-' + key, [{ value: 'allow', label: 'Allow' }, { value: 'exclude', label: 'Exclude' }], cur, { label: r.id })}<div class="hint">Default: ${def}. Your choice: ${cur}.</div></div>`;
 }
 function peopleGlobalFlagsHTML(person) {
   const flags = Object.entries(uiState.conditionsMeta.flags || {}).filter(([, f]) => !f.module);
@@ -528,7 +529,8 @@ function peopleSyncVegPatternFromVariant(person, variant) {
 function peopleStepAllergens(container, person) {
   const sel = new Set(person.allergens || []);
   const allergyModule = uiState.conditionsById.get('food-allergies');
-  const configurable = ((allergyModule && allergyModule.rules) || []).filter(r => r.configurable);
+  const configurable = ((allergyModule && allergyModule.rules) || []).filter(r => r.configurable && !r.allergen);
+  const perAllergy = ((allergyModule && allergyModule.rules) || []).filter(r => r.configurable && r.allergen);
   container.innerHTML = `
     ${uiNoticeHTML({ level: 'block', text: 'Allergens are hard exclusions. Nothing in this app overrides them: not a preference, not a mode, not an acknowledgment. When an ingredient is not recognized, the app says so and does not assume it is safe.' })}
     <p>Confirmed food allergies (the nine FDA major allergens):</p>
@@ -541,7 +543,8 @@ function peopleStepAllergens(container, person) {
       <div class="hint">Separate them with commas. Each one is a hard stop, the same as the nine above: never planned, and "Not allowed" on recipes and labels. The app looks for the word in ingredient lists, so list every name the food goes by (for example mustard and Dijon, or buckwheat and soba). US labels must always name the nine major allergens, but other foods used as a spice or flavoring can be listed only as "spice" or "natural flavor". While anything is listed here, the app flags those words so you check with the maker.</div>
       <p class="small" id="pa-other-saved" aria-live="polite">${peopleOtherAllergies(person).length ? `Hard stops: <strong>${peopleOtherAllergies(person).map(uiEsc).join(', ')}</strong>` : ''}</p>
     </div>
-    ${configurable.length ? `<div class="card" style="margin-top:1rem"><h3>"May contain" and shared-facility labels</h3><p class="small muted">Many people with allergies avoid these. The evidence on actual risk is mixed, so this is your call. Applies when at least one allergen is listed above.</p>${configurable.map(r => peopleConfigurableRuleHTML(r, person)).join('')}</div>` : ''}`;
+    ${perAllergy.map(r => `<div class="card" style="margin-top:1rem"><h3>${uiEsc(UI_ALLERGENS.find(a => a.tag === r.allergen) ? UI_ALLERGENS.find(a => a.tag === r.allergen).label : r.allergen)}: ask your allergist</h3><p class="small muted">Applies only when this allergy is checked above.</p>${peopleConfigurableRuleHTML(r, person)}</div>`).join('')}
+    ${configurable.length ? `<div class="card" style="margin-top:1rem"><h3>"May contain" and shared-facility labels</h3><p class="small muted">Many people with allergies avoid these, and the evidence on the real risk is mixed. A warning that names one of your allergies is always a stop. For warnings about other foods, this is your call. Applies when at least one allergen is listed above.</p>${configurable.map(r => peopleConfigurableRuleHTML(r, person)).join('')}</div>` : ''}`;
   container.querySelectorAll('[data-allergen]').forEach(inp => inp.addEventListener('change', () => {
     person.allergens = person.allergens || [];
     const t = inp.dataset.allergen;
@@ -1110,6 +1113,8 @@ export async function peopleOpenSharedPerson(personId) {
   const s = sharingState();
   const res = await sharingSafe(() => openPerson(s.db, s.identity, personId), null, 'That profile could not be opened right now.');
   if (!res) { uiToast('That profile is not in the shared store any more.'); return; }
+  // P2-7: a profile that does not come from the device it names, or was changed or moved in the store, is refused.
+  if (res.locked && ['sender', 'moved', 'unreadable'].includes(res.reason)) { uiToast('That profile was not opened: it does not match the device that published it, or it was changed in the shared store. Ask that device to share it again.'); return; }
   if (res.locked) { uiToast('That profile is encrypted for another device. Only its device and the owner can open it.'); return; }
   sharingPersonModal(res.person, { subtitle: `From the shared store, updated ${String(res.updated || '').slice(0, 10)}. Read-only.`, sourceKey: 'store:' + personId });
 }

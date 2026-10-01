@@ -1,7 +1,7 @@
 // Settings: appearance (theme, large text), export, import, guests, clear, about.
-import { exportJSON, importJSON, clearAll, defaultProfile, backupDue, storeState } from '../store.js';
+import { exportJSON, importJSON, clearAll, defaultProfile, backupDue, storeState, unreadableCopies, keepBeforeImport, recipeCollectionsOn } from '../store.js';
 import { appCollectionCounts } from '../app.js';
-import { uiState, uiEsc, uiPersist, uiDownload, uiToast, uiNavigate, uiIsoDate, uiCopyText, uiEnsurePerson, uiPageHeader, uiSection, uiSwitch, uiSegmented, uiChip, uiIcon, uiLoadUiPrefs, uiSaveUiPrefs, uiNoticeHTML, uiModal } from './common.js';
+import { uiState, uiEsc, uiPersist, uiDownload, uiToast, uiNavigate, uiIsoDate, uiCopyText, uiEnsurePerson, uiPageHeader, uiSection, uiSwitch, uiSegmented, uiChip, uiIcon, uiLoadUiPrefs, uiSaveUiPrefs, uiNoticeHTML, uiModal, uiShareFile, uiUndoToast } from './common.js';
 import { claimOwner, registerDevice, sealOwnerBackup, restoreOwnerBackup, forgetDeviceIdentity, removePerson } from '../engine/sync.js';
 import { sharingState, sharingLocalHTML, sharingPendingHTML, sharingSafe, sharingPublishIfShared, sharingShortFingerprint } from './sharing.js';
 import { installInSafariTab, installInBrowserTab, installShowGuide } from './install.js';
@@ -34,6 +34,7 @@ export function renderSettingsScreen(root) {
       ${guests.length ? `<div class="list boxed">${guests.map(g => `<div class="list-row"><div class="list-main"><div class="list-title">${uiEsc(g.name)} ${uiChip('Guest', 'plum')}</div><div class="list-sub">${(g.allergens || []).length ? 'allergens: ' + g.allergens.length : 'no allergens'}, ${(g.modules || []).length} module${(g.modules || []).length === 1 ? '' : 's'}</div></div><div class="list-actions"><button class="btn small danger" type="button" data-remove-guest="${uiEsc(g.id)}">Remove</button></div></div>`).join('')}</div>` : '<p class="small muted">No guests. Add one on the Together screen by pasting a shared profile or choosing a file.</p>'}`, { id: 'set-guests-h' })}
     ${uiSection('Calendar export', `<p class="small">"Add to calendar (.ics)" on the Grocery and Together screens saves a standard calendar file with one all-day event per day listing that day's meals. Import it into Google Calendar (Settings, Import and export), Apple Calendar, Outlook, or a Skylight calendar. There is no direct Google Keep or Skylight list integration; use Share or Copy for the grocery list itself.</p>`, { id: 'set-cal-h' })}
     ${uiSection('Sharing and privacy', settingsSharingHTML(profile), { id: 'set-share-h' })}
+    ${settingsUnreadableHTML()}
     ${uiSection('Clear all data', `<p>Removes every person, log entry, and grocery tick from this device. Export first if you want a copy.</p>
       <div><button class="btn danger" type="button" id="set-clear">${uiIcon('trash')}Clear all data</button></div>`, { id: 'set-clear-h' })}
     ${uiSection('About', `<dl class="kv">
@@ -81,15 +82,51 @@ export function renderSettingsScreen(root) {
   });
   settingsBindSharing(root, profile);
   settingsBindCollections(root, profile);
+  settingsBindUnreadable(root);
   root.querySelector('#set-clear').addEventListener('click', () => {
-    if (!window.confirm('Clear all data on this device? This cannot be undone.')) return;
+    // P2-6: Clear data also removes this build's grocery ticks (not the other build's) and this device's shared-store key.
+    const s = uiState.sync || {};
+    const keyNote = s.identity ? (s.isOwner ? " This device's sharing key goes too, and with it the owner role, unless it was backed up." : " This device's sharing key goes too.") : '';
+    if (!window.confirm('Clear all data on this device? This cannot be undone.' + keyNote)) return;
     clearAll();
-    try { for (const k of Object.keys(localStorage)) if (k.startsWith('sn-grocery:')) localStorage.removeItem(k); } catch { /* ignore */ }
+    s.identity = null; s.isOwner = false;
     uiState.profile = defaultProfile();
     uiPersist();
     uiToast('Cleared.');
     uiNavigate('#/welcome');
   });
+}
+
+// ---- Saved data that could not be read (P0-4, fix pass of September 30, 2026) ----
+// store.js keeps each unreadable save under its own key. Clear data leaves these copies alone; only this list removes
+// one, and only after the person saves it as a file or confirms.
+function settingsUnreadableHTML() {
+  const copies = unreadableCopies();
+  if (!copies.length) return '';
+  return uiSection('Saved data that could not be read', `<div class="card">
+      <p>This device keeps ${copies.length === 1 ? 'a copy' : copies.length + ' copies'} of saved data the app could not read. Save ${copies.length === 1 ? 'it' : 'each one'} as a file for whoever looks after this app; they may be able to recover it.</p>
+      <div class="list boxed">${copies.map((c, i) => `<div class="list-row"><div class="list-main"><div class="list-title">Kept ${uiEsc(settingsUnreadableWhen(c.key))}</div><div class="list-sub">${uiEsc(String((c.text || '').length))} characters</div></div>
+        <div class="btn-row"><button class="btn small" type="button" data-unreadable-file="${i}">Save as a file</button><button class="btn small danger" type="button" data-unreadable-delete="${i}">Delete</button></div></div>`).join('')}</div>
+    </div>`, { id: 'set-unreadable-h' });
+}
+function settingsUnreadableWhen(key) {
+  const t = new Date(key.split(':unreadable:')[1] || '');
+  return Number.isFinite(t.getTime()) ? t.toLocaleString(undefined, { month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : key;
+}
+function settingsBindUnreadable(root) {
+  const copies = unreadableCopies();
+  root.querySelectorAll('[data-unreadable-file]').forEach(b => b.addEventListener('click', async () => {
+    const c = copies[Number(b.dataset.unreadableFile)];
+    if (!c) return;
+    const r = await uiShareFile(`peace-meal-could-not-read-${uiIsoDate()}.json`, c.text || '', 'Peace Meal: saved data that could not be read');
+    if (r === 'shared' || r === 'saved') uiToast('Saved as a file.'); else if (r === 'failed') uiToast('The file could not be saved here.');
+  }));
+  root.querySelectorAll('[data-unreadable-delete]').forEach(b => b.addEventListener('click', () => {
+    const c = copies[Number(b.dataset.unreadableDelete)];
+    if (!c || !window.confirm('Delete this copy of the data that could not be read? Save it as a file first if anyone may want it. This cannot be undone.')) return;
+    try { localStorage.removeItem(c.key); } catch { /* ignore */ }
+    uiToast('Deleted.'); uiState.rerender();
+  }));
 }
 
 // ---- Sharing and privacy (shared store on claude.ai; one calm sentence everywhere else) ----
@@ -213,7 +250,7 @@ function settingsRestoreModal(text) {
 // was removed).
 const SETTINGS_USDA_NOTICE = 'These recipes come from USDA MyPlate Kitchen, a free US government collection. The app checks each one against your plan the same way it checks every other recipe, and the nutrition numbers per serving are the ones USDA publishes.';
 function settingsCollectionsHTML(profile) {
-  const on = Object.assign({ nhs: true, parentclub: true, nhlbi: true, va: true, wikibooks: true, usda: false, review_dual: true }, profile.recipe_collections || {});
+  const on = recipeCollectionsOn(profile);
   const n = appCollectionCounts();
   return `<div class="card">
     <p class="small">Tick a collection to include its recipes in search, the week plan, and Pantry. Untick it to leave all of them out. Recipes written for Peace Meal and your own are always included.</p>
@@ -228,7 +265,7 @@ function settingsCollectionsHTML(profile) {
 }
 function settingsBindCollections(root, profile) {
   const setColl = (key, value) => {
-    profile.recipe_collections = Object.assign({ nhs: true, parentclub: true, nhlbi: true, va: true, wikibooks: true, usda: false, review_dual: true }, profile.recipe_collections || {}, { [key]: value });
+    profile.recipe_collections = Object.assign(recipeCollectionsOn(profile), { [key]: value });
     uiPersist();
     if (typeof uiState.refreshRecipes === 'function') uiState.refreshRecipes();
     uiToast(value ? 'Collection included.' : 'Collection left out.');
@@ -290,16 +327,29 @@ export function settingsImportFile(file, done) {
       const incoming = importJSON(String(reader.result));
       const n = incoming.people.length;
       const here = uiState.profile.people.length;
-      if (!window.confirm(here ? `Replace everything on this device with this file (${n} ${n === 1 ? 'person' : 'people'}, ${(incoming.log || []).length} log entries)?` : `Bring in this file (${n} ${n === 1 ? 'person' : 'people'}, ${(incoming.log || []).length} log entries)?`)) { if (done) done(false); return; }
+      const dropped = incoming._importDropped || 0;
+      const odd = dropped ? ` ${dropped} ${dropped === 1 ? 'value in it was' : 'values in it were'} not the right kind and will be left out.` : '';
+      if (!window.confirm((here ? `Replace everything on this device with this file (${n} ${n === 1 ? 'person' : 'people'}, ${(incoming.log || []).length} log entries)?` : `Bring in this file (${n} ${n === 1 ? 'person' : 'people'}, ${(incoming.log || []).length} log entries)?`) + odd)) { if (done) done(false); return; }
+      // Keep what was here, so the import can be undone (P1-2).
+      const before = here ? uiState.profile : null;
+      const beforeKey = here ? keepBeforeImport() : null;
       uiState.profile = incoming;
       if (!Array.isArray(uiState.profile.log)) uiState.profile.log = [];
       uiState.profile.people.forEach(uiEnsurePerson);
       if (!uiState.profile.activePerson && n) uiState.profile.activePerson = incoming.people[0].id;
       const saved = uiPersist();
       if (uiState.refreshRecipes) uiState.refreshRecipes();
-      uiToast(saved ? 'Imported.' : 'Imported for now, but not saved on this device. See the message at the top.');
       if (done) done(true);
       uiNavigate(uiState.lite ? '#/today' : '#/home');
+      if (before) uiUndoToast(saved ? 'Imported. The data from before is kept.' : 'Imported for now, but not saved on this device.', () => {
+        uiState.profile = before;
+        uiPersist();
+        if (uiState.refreshRecipes) uiState.refreshRecipes();
+        uiToast('Put back the data from before the import.');
+        uiState.rerender();
+      });
+      else uiToast(saved ? 'Imported.' : 'Imported for now, but not saved on this device. See the message at the top.');
+      if (beforeKey) uiState.lastBeforeImport = beforeKey;
     } catch (err) {
       uiToast('Import failed: ' + err.message);
       if (done) done(false);

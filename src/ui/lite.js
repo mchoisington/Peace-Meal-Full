@@ -4,7 +4,7 @@ import { symptomEpisodes, foodsBeforeSymptoms, weightTrend, reportDays, intakeAv
 import { lbToKg, kgToLb } from '../engine/energy.js';
 import { uiState, uiEsc, uiActivePerson, uiPlanFor, uiPersist, uiToast, uiModal, uiIsoDate, uiToday, uiFmtDate, uiFmtNum, uiPageHeader, uiSection, uiChip, uiIcon, uiEmptyState, uiNoticeHTML, uiTagLabel, uiSourcesHTML, uiDownload, uiSegmented, uiUndoToast } from './common.js';
 import { todayAddDiaryEntry, todayAddModal, todayLatestWeightKg, todayChartSVG, todayShiftDate, todayEntryName, todayWeightLossNoticeHTML, todayMealStackingHTML, todayBindHistoryButtons, todayAmountModal } from './today.js';
-import { weekGet } from './week.js';
+import { weekGet, weekCached } from './week.js';
 import { LOG_SYMPTOMS } from './log.js';
 import { SLOT_LABEL } from '../engine/planner.js';
 import { settingsShareBackup, settingsBackupReminderHTML, settingsBindBackupReminder } from './settings.js';
@@ -20,7 +20,10 @@ export function renderLiteTodayScreen(root) {
   const person = uiActivePerson();
   const plan = uiPlanFor(person);
   const date = uiIsoDate(uiToday());
-  const week = uiState.data.recipes.length ? weekGet(person, plan) : null;
+  // P2-1 (fix pass of September 30, 2026): Today shows at once; when the week is not built yet, it is built right after
+  // the first paint and Today is drawn again (liteBuildWeekSoon).
+  const week = uiState.data.recipes.length ? weekCached(person, plan) : null;
+  const weekPending = uiState.data.recipes.length > 0 && !week;
   const day = week ? week.days.find(d => d.date === date) : null;
   const entries = (uiState.profile.diary || []).filter(e => e.person === person.id && e.date === date);
   // Today's symptom entries as stored (not copies), so each one can be removed; and today's "feeling fine", if any.
@@ -42,7 +45,7 @@ export function renderLiteTodayScreen(root) {
       const logged = entries.filter(e => e.meal === LITE_SLOT_TO_DIARY[slot] || e.meal === slot);
       return `<div class="lite-slot card">
         <div class="lite-slot-head"><span class="slot">${SLOT_LABEL[slot] || slot}</span>${logged.length ? uiChip(`${logged.length} logged`, 'pass') : ''}</div>
-        ${planned && planned.recipe ? `<p class="lite-planned">Planned: <strong>${uiEsc(planned.name)}</strong></p>` : '<p class="small muted">Nothing planned for this slot.</p>'}
+        ${planned && planned.recipe ? `<p class="lite-planned">Planned: <strong>${uiEsc(planned.name)}</strong></p>` : weekPending ? `<p class="small muted">Working out today's plan…</p>` : '<p class="small muted">Nothing planned for this slot.</p>'}
         ${logged.length ? `<ul class="lite-logged">${logged.map(e => `<li class="lite-logged-row"><span>${uiEsc(todayEntryName(e))}</span>${removeBtn(uiState.profile.diary, e, todayEntryName(e))}</li>`).join('')}</ul>` : ''}
         ${todayMealStackingHTML(plan, logged)}
         <div class="btn-row">${planned && planned.recipe && !logged.some(e => e.ref === planned.recipe) ? `<button class="btn primary lite-big" type="button" data-ate="${uiEsc(slot)}">${uiIcon('check')}I ate this</button><button class="btn lite-big" type="button" data-ate-part="${uiEsc(slot)}">Only part of it</button>` : ''}<button class="btn lite-big" type="button" data-other="${uiEsc(slot)}">${uiIcon('plus')}Something else</button></div>
@@ -106,6 +109,29 @@ export function renderLiteTodayScreen(root) {
     uiState.profile.weights.push({ date, person: person.id, kg });
     person.weight_kg = kg;
     uiPersist(); uiToast(`Saved ${lb} lb.`); uiState.rerender();
+  });
+  if (weekPending) liteBuildWeekSoon();
+}
+
+// P2-1 (fix pass of September 30, 2026): the week is built after Today has been painted, for whoever is active then
+// (with their plan as it is then), and Today is drawn again with the planned meals. While the person is typing or has
+// a sheet open, the redraw waits until they are done (checked every 1.5 seconds), so nothing they typed is lost.
+let liteWeekBuilding = false;
+function liteBuildWeekSoon() {
+  if (liteWeekBuilding) return;
+  liteWeekBuilding = true;
+  // Two frames, then a task: Today's first frame is on screen before the build starts.
+  const afterPaint = fn => (typeof requestAnimationFrame === 'function' ? requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(fn, 0))) : setTimeout(fn, 0));
+  afterPaint(() => {
+    try { const p = uiActivePerson(); if (p) weekGet(p, uiPlanFor(p)); } catch (e) { console.warn(e); }
+    const busy = () => { const a = document.activeElement; return !!uiState.modalClose || !!(a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)); };
+    const redraw = () => {
+      if (!uiState.route || uiState.route.screen !== 'today') { liteWeekBuilding = false; return; }
+      if (busy()) { setTimeout(redraw, 1500); return; }
+      liteWeekBuilding = false;
+      uiState.rerender();
+    };
+    redraw();
   });
 }
 
@@ -218,7 +244,7 @@ export function renderLiteReportScreen(root) {
   const body = `
     <div class="report-sheet" id="lite-report">
       <h1 class="report-title">Food and symptom report</h1>
-      <p class="report-meta">${uiEsc(person.name)}${person.age ? `, age ${person.age}` : ''}. ${uiFmtDate(from)} to ${uiFmtDate(to)} (${liteReportUi.days} days)${onlySym ? ', days with symptoms only' : ', full diary'}. Printed from Peace Meal on ${uiFmtDate(to)}. Self-reported by the patient; the app records, it does not diagnose.</p>
+      <p class="report-meta">${uiEsc(person.name)}${person.age ? `, age ${uiEsc(person.age)}` : ''}. ${uiFmtDate(from)} to ${uiFmtDate(to)} (${liteReportUi.days} days)${onlySym ? ', days with symptoms only' : ', full diary'}. Printed from Peace Meal on ${uiFmtDate(to)}. Self-reported by the patient; the app records, it does not diagnose.</p>
       <h2>Current restrictions</h2>
       ${(person.allergens || []).length || (plan.otherAllergies || []).length ? `<p class="small"><strong>Allergies (never):</strong> ${[...(person.allergens || []).map(uiTagLabel), ...(plan.otherAllergies || [])].map(uiEsc).join(', ')}.</p>` : ''}
       ${plan.modules.length ? `<ul class="report-list">${plan.modules.map(m => { const mod = uiState.conditionsById.get(m.id); const hard = avoid.filter(([, a]) => a.hard && a.rules.some(r => r.module === m.id)).map(([t]) => uiTagLabel(t)); const soft = avoid.filter(([, a]) => !a.hard && a.rules.some(r => r.module === m.id)).map(([t]) => uiTagLabel(t)); const srcs = [...new Set(avoid.flatMap(([, a]) => a.rules.filter(r => r.module === m.id).flatMap(r => r.sources || [])).concat((mod && mod.sources) || []))].slice(0, 2); return `<li><strong>${uiEsc(m.name)}</strong>${hard.length ? `. Never: ${hard.map(uiEsc).join(', ')}` : ''}${soft.length ? `. Avoid: ${soft.map(uiEsc).join(', ')}` : ''}${!hard.length && !soft.length ? '. Guidance only, no foods excluded' : ''}.${srcs.length ? ` <span class="small muted">${uiSourcesHTML(srcs)}</span>` : ''}</li>`; }).join('')}</ul>` : '<p class="small muted">No conditions selected.</p>'}
@@ -230,12 +256,12 @@ export function renderLiteReportScreen(root) {
       ${meds.length ? `<ul class="report-list">${meds.map(m => `<li>Yes: ${uiEsc(m.text)}</li>`).join('')}</ul>` : '<p class="small muted">None answered yes.</p>'}
       <h2>Average daily intake</h2>
       ${intake.days ? `<p class="small muted">Averaged over the ${intake.days} day${intake.days === 1 ? '' : 's'} in this range with food logged. Amounts come from USDA values by grams or a recipe's published per-serving numbers; anything logged without numbers is not counted.</p>
-      <table class="report-table"><thead><tr><th>Nutrient</th><th class="num">Average per day</th><th class="num">Daily limit in the plan</th></tr></thead><tbody>${intakeRows.map(([k, label, unit]) => `<tr><td>${label}</td><td class="num">${typeof intake.avg[k] === 'number' ? uiFmtNum(Math.round(intake.avg[k])) + (unit ? ' ' + unit : '') : '-'}</td><td class="num">${plan.limits && plan.limits[k] ? uiFmtNum(plan.limits[k].value) + (unit ? ' ' + unit : '') : '-'}</td></tr>`).join('')}</tbody></table>` : '<p class="small muted">No food logged in this range.</p>'}
+      <div class="table-wrap" role="region" aria-label="Average daily intake" tabindex="0"><table class="report-table"><thead><tr><th>Nutrient</th><th class="num">Average per day</th><th class="num">Daily limit in the plan</th></tr></thead><tbody>${intakeRows.map(([k, label, unit]) => `<tr><td>${label}</td><td class="num">${typeof intake.avg[k] === 'number' ? uiFmtNum(Math.round(intake.avg[k])) + (unit ? ' ' + unit : '') : '-'}</td><td class="num">${plan.limits && plan.limits[k] ? uiFmtNum(plan.limits[k].value) + (unit ? ' ' + unit : '') : '-'}</td></tr>`).join('')}</tbody></table></div>` : '<p class="small muted">No food logged in this range.</p>'}
       <h2>Symptoms: ${eps.length} episode${eps.length === 1 ? '' : 's'}</h2>
       ${eps.length ? `<p class="small">Most frequent: ${liteTopSymptoms(eps).map(([id, n]) => `${uiEsc(liteSymptomLabel(id))} (${n})`).join(', ')}.</p>` : '<p class="small muted">None logged in this range.</p>'}
       ${foods.length ? `<h2>Foods eaten in the 24 hours before symptoms</h2>
       <p class="small muted">Counts only, and an association is not a cause. A food eaten every day shows up before everything, and a food that appears before most episodes still needs a supervised trial off and back on before anyone calls it a trigger.</p>
-      <table class="report-table"><thead><tr><th>Food or meal</th><th class="num">Before episodes</th><th class="num">Times eaten</th></tr></thead><tbody>${foods.map(f => `<tr><td>${uiEsc(f.name)}</td><td class="num">${f.episodes} of ${eps.length}</td><td class="num">${f.total}</td></tr>`).join('')}</tbody></table>` : ''}
+      <div class="table-wrap" role="region" aria-label="Foods eaten before symptoms" tabindex="0"><table class="report-table"><thead><tr><th>Food or meal</th><th class="num">Before episodes</th><th class="num">Times eaten</th></tr></thead><tbody>${foods.map(f => `<tr><td>${uiEsc(f.name)}</td><td class="num">${f.episodes} of ${eps.length}</td><td class="num">${f.total}</td></tr>`).join('')}</tbody></table></div>` : ''}
       <h2>${onlySym ? 'Days with symptoms' : 'Day by day'}</h2>
       ${days.length ? days.map(d => `<div class="report-day">
         <h3>${uiEsc(uiFmtDate(d.date))}${d.weight ? ` <span class="muted small">${kgToLb(d.weight.kg)} lb</span>` : ''}</h3>

@@ -1,18 +1,20 @@
 // Grocery: list from the current week, grouped by food group, with eaters per day, shopper edits (quantity, grams, note,
 // remove), a change log that records every difference and why, copy and share, and a calendar (.ics) export of the week's meals.
 import { buildGroceryList, applyAdjustments, diffGrocery, groceryText } from '../engine/grocery.js';
-import { uiState, uiEsc, uiActivePerson, uiPlanFor, uiWeekKey, uiFmtDate, uiFmtNum, uiToast, uiCopyText, uiPersist, uiIsoDate, uiToday, uiDownload, uiPageHeader, uiSection, uiChip, uiIcon, uiNoticeHTML, uiEmptyState } from './common.js';
+import { uiState, uiEsc, uiActivePerson, uiPlanFor, uiWeekKey, uiFmtDate, uiFmtNum, uiToast, uiCopyText, uiPersist, uiIsoDate, uiToday, uiDownload, uiPageHeader, uiSection, uiChip, uiIcon, uiNoticeHTML, uiEmptyState, uiSaveSmall } from './common.js';
 import { weekGet } from './week.js';
+import { groceryKeyPrefix } from '../store.js';
 import { householdWeekGet, householdPseudoPerson } from './household.js';
 
 const GROCERY_DAY_NAMES = { sun: 'Sunday', mon: 'Monday', tue: 'Tuesday', wed: 'Wednesday', thu: 'Thursday', fri: 'Friday', sat: 'Saturday' };
 const GROCERY_SLOT_LABEL = { breakfast: 'Breakfast', lunch: 'Lunch', dinner: 'Dinner' };
-function groceryStorageKey(person) { return 'sn-grocery:' + uiWeekKey(person); }
+// Each build's own ticks (P2-6): store.js copied the old shared sn-grocery:<week> keys at launch.
+function groceryStorageKey(person) { return groceryKeyPrefix() + uiWeekKey(person); }
 function groceryLoadChecked(person) {
   try { return new Set(JSON.parse(localStorage.getItem(groceryStorageKey(person)) || '[]')); } catch { return new Set(); }
 }
 function grocerySaveChecked(person, set) {
-  try { localStorage.setItem(groceryStorageKey(person), JSON.stringify([...set])); } catch { /* ignore */ }
+  return uiSaveSmall(groceryStorageKey(person), JSON.stringify([...set]), 'That tick was not saved, so it will be gone next time.');   // P3-10
 }
 
 function grocerySodiumFlag(item) {
